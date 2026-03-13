@@ -1,0 +1,416 @@
+---
+title: "Data_prep_figures"
+author: "Fausto Machado-Silva"
+format: html
+editor: visual
+---
+
+## Read_df
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+
+# Reads "df_exo_clima.csv" from "data.zip" without extracting to disk -- dfs with QAQC - Flags for out of data ranges and out of water
+require(pacman)
+p_load(data.table,  tidyverse, dplyr, ggplot, patchwork, cowplot)
+df <- read.csv(unz("df_exo_clima.zip", "df_exo_clima.csv"))
+
+```
+
+## Prep_df
+
+```{r}
+# (1) formating variables
+df <- df %>%
+  mutate(
+    site = factor(site, levels = c("CRC", "PTR", "OWC", "MSM")),       
+    datetime = force_tz(ymd_hms(datetime), tz = "EST"),             
+    source = as.factor(source),                                        
+    date = as_date(datetime),                                         
+    month = as.factor(format(datetime, "%b")),                         
+    year = as.factor(year(datetime)),                                  
+    time_day_c = format(datetime, "%H:%M"),
+    time_day = as.POSIXct(time_day_c, format = "%H:%M", tz = "EST"),
+    Eh = orp_mv - (0.718 * temp_c) + 224.41) %>%
+  dplyr::select(site, source, datetime, time_day, time_day_c, date, month, year, everything())
+
+tz(df$time_day)
+tz(df$datetime)
+
+# (2) excluding PAR (NA values) from OWC
+df <- df %>%
+  mutate(
+    flag_PAR_out = case_when(
+      site == "OWC" & 
+        datetime > ymd_hms("2023-06-11 04:00:00") & 
+        datetime < ymd_hms("2023-06-14 08:00:00") ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
+
+# (3) Calculating diel averages and standard deviations for fig 1
+summary_df <- df %>%
+  filter(flag_out_range_orp == FALSE,
+         flag_out_range_ph == FALSE,
+         flag_out_of_water == FALSE,
+         flag_out_of_SPC == FALSE,
+         flag_out_DO_range == FALSE,
+         flag_PAR_out == FALSE) %>%
+  group_by(site, 
+           time_day
+  ) %>%
+  summarise(
+    n_obs_Eh = sum(!is.na(Eh)),
+    mean_Eh = mean(Eh, na.rm = TRUE),
+    sd_Eh = sd(Eh, na.rm = TRUE),
+    min_Eh = min(Eh, na.rm = TRUE),
+    
+    mean_DO = mean(odo_mg_l, na.rm = TRUE),
+    sd_DO = sd(odo_mg_l, na.rm = TRUE),
+    
+    mean_ph = mean(ph, na.rm = TRUE),
+    sd_ph = sd(ph, na.rm = TRUE),
+    
+    mean_par = mean(par_den_c_avg, na.rm = TRUE),
+    sd_par = sd(par_den_c_avg, na.rm = TRUE),
+    
+    mean_T = mean(temp_c, na.rm = TRUE),
+    sd_T = sd(temp_c, na.rm = TRUE)
+  )
+```
+
+## Diel variation plots
+
+```{r}
+# (0) Define custom color palette 
+# (ref: https://scales.r-lib.org/reference/viridis_pal-1.png)
+custom_colors <- c("#440154FF", "#3E4A89FF", "#1F9E89FF", "#6DCD59FF") 
+
+# (1) Eh  -------------------------------------------------------
+plot_diel_Eh <- summary_df %>%
+  ggplot(aes(x = time_day, group = site, fill = site)) +  
+  geom_line(aes(y = mean_Eh, color = site), linewidth = 1.5) +  
+  geom_ribbon(aes(ymin = mean_Eh - sd_Eh, ymax = mean_Eh + sd_Eh), alpha = 0.2, show.legend = FALSE) +  
+  theme_minimal() +
+  labs(title = "", y = "Eh (mV)", x = "") +
+  scale_x_datetime(date_labels = "%H") +
+  facet_wrap(vars(site), nrow=1,axes = "all", axis.labels = "all_x", scale="free_y")+
+  scale_colour_manual(values = custom_colors) + 
+  scale_fill_manual(values = custom_colors) +
+  scale_y_continuous(
+    breaks = seq(ceiling(min(summary_df$mean_Eh - summary_df$sd_Eh)), ceiling(max(summary_df$mean_Eh + summary_df$sd_Eh)), by = 60)
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_blank(),
+    panel.border = element_blank(),
+    legend.position = "none",
+    strip.text = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10),
+    plot.margin = unit(c(0, 0, 0, 0), "pt"), 
+    panel.spacing = unit(2, "lines"), 
+    strip.background = element_blank()
+  )
+
+# (2) DO ------------------------------------------------------------------
+plot_diel_DO <- summary_df %>%
+  ggplot(aes(x = time_day, group = site, fill = site)) +  
+  geom_line(aes(y = mean_DO, color = site), linewidth = 1.5) +  
+  geom_ribbon(aes(ymin = mean_DO - sd_DO, ymax = mean_DO + sd_DO), alpha = 0.2, show.legend = FALSE) +  
+  theme_minimal() +
+  labs(
+    title = "", 
+    y = expression(DO~(mg~L^{-1})), 
+    x = ""
+  ) +
+  scale_x_datetime(date_labels = "%H") +
+  facet_wrap(vars(site), nrow=1,axes = "all", axis.labels = "all_x", scale="free_y")+
+  scale_colour_manual(values = custom_colors) + 
+  scale_fill_manual(values = custom_colors) +
+  scale_y_continuous(
+    breaks = seq(0, ceiling(max(summary_df$mean_DO + summary_df$sd_DO)), by = 3)
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_blank(),
+    panel.border = element_blank(),
+    legend.position = "none",
+    strip.text = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10),
+    plot.margin = unit(c(0, 0, 0, 0), "pt"),
+    panel.spacing = unit(2, "lines")
+  )
+
+
+# (3) pH -------------------------------------------------------------
+plot_diel_pH <- summary_df %>%
+  ggplot(aes(x = time_day, group = site, fill = site)) +
+  geom_line(aes(y = mean_ph, color = site), linewidth = 1.5) +
+  geom_ribbon(aes(ymin = mean_ph - sd_ph, ymax = mean_ph + sd_ph), alpha = 0.2, show.legend = FALSE) +
+  theme_minimal() +
+  labs(title = "", y = "pH", x = "") +
+  scale_x_datetime(date_labels = "%H") +
+  facet_wrap(vars(site), nrow=1,axes = "all", axis.labels = "all_x", scale="free_y")+
+  scale_colour_manual(values = custom_colors) +
+  scale_fill_manual(values = custom_colors) +
+  scale_y_continuous(
+    breaks = seq(6.8, ceiling(max(summary_df$mean_ph + summary_df$sd_ph)), by = 0.3)
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_blank(),
+    panel.border = element_blank(),
+    legend.position = "none",
+    strip.text = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10),
+    plot.margin = unit(c(0, 0, 0, 0), "pt"),  
+    panel.spacing = unit(2, "lines"),  
+    strip.background = element_blank()
+  )
+
+# (4) PAR ---------------------------------------------------------------
+plot_diel_PAR <- summary_df %>%
+  ggplot(aes(x = time_day, group = site, fill = site)) +  
+  geom_line(aes(y = mean_par, color = site), linewidth = 1.5) +  
+  geom_ribbon(aes(ymin = mean_par - sd_par, ymax = mean_par + sd_par), alpha = 0.2, show.legend = FALSE) +  
+  theme_minimal() +
+  labs(
+    title = "", 
+    y = expression(PAR~(mmol~m^{-2})),  
+    x = "Hour of day"
+  ) +
+  scale_x_datetime(date_labels = "%H") +
+  facet_wrap(vars(site), nrow=1,axes = "all", axis.labels = "all_x", scale="free_y")+
+  scale_colour_manual(values = custom_colors) + 
+  scale_fill_manual(values = custom_colors) +
+  scale_y_continuous(
+    breaks = seq(0, ceiling(max(summary_df$mean_par + summary_df$sd_par)), by = 300)
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_blank(),
+    panel.border = element_blank(),
+    legend.position = "none",
+    strip.text = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10),
+    plot.margin = unit(c(0, 2, 0, 0), "pt"),  
+    panel.spacing = unit(2, "lines"), 
+    strip.background = element_blank()
+  )
+```
+
+## Slopes calcs
+
+```{r}
+
+# (1) Eh vs DO -----------------------------------------------------------
+slope_robusto <- df %>%
+  filter(
+    flag_out_range_orp == FALSE,
+    flag_out_range_ph == FALSE,
+    flag_out_of_water == FALSE,
+    flag_out_of_SPC == FALSE,
+    flag_out_DO_range == FALSE,
+    odo_mg_l >= 0
+  ) %>%
+  group_by(site, date) %>%
+  filter(n() > 10) %>% 
+  summarise(
+    slope_rlm = if (n() >= 10) {
+      coef(robustbase::lmrob(Eh ~ odo_mg_l))[2]
+    } else {
+      NA_real_
+    },
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(slope_rlm))  
+
+
+# (2) Eh vs pH --------------------------------------------------------
+slope_robusto2 <- df %>%
+  filter(
+    flag_out_range_orp == FALSE,
+    flag_out_range_ph == FALSE,
+    flag_out_of_water == FALSE,
+    flag_out_of_SPC == FALSE,
+    flag_out_DO_range == FALSE,
+    odo_mg_l >= 0
+  ) %>%
+  group_by(site, date) %>%
+  filter(n() > 10) %>%
+  summarise(
+    result = list(
+      tryCatch({
+        fit <- robustbase::lmrob(Eh ~ ph)
+        slope <- coef(fit)[2]
+        pval  <- summary(fit)$coefficients[2, 4]
+        tibble(slope = slope, p_value = pval)
+      }, error = function(e) tibble(slope = NA_real_, p_value = NA_real_),
+      warning = function(w) tibble(slope = NA_real_, p_value = NA_real_)
+      )
+    ),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  tidyr::unnest(result) %>%
+  filter(!is.na(p_value), p_value < 0.05)  
+
+
+# (3) Eh vs temperature -----------------------------------------
+slope_robusto3 <- df %>%
+  filter(
+    flag_out_range_orp == FALSE,
+    flag_out_range_ph == FALSE,
+    flag_out_of_water == FALSE,
+    flag_out_of_SPC == FALSE,
+    flag_out_DO_range == FALSE,
+    odo_mg_l >= 0
+  ) %>%
+  group_by(site, date) %>%
+  filter(n() > 10) %>%
+  summarise(
+    result = list(
+      tryCatch({
+        fit <- suppressWarnings(robustbase::lmrob(Eh ~ temp_c))
+        tibble(
+          slope_rlm = coef(fit)[2],
+          p_value   = summary(fit)$coefficients[2, 4]
+        )
+      }, error = function(e) tibble(slope_rlm = NA_real_, p_value = NA_real_))
+    ),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  tidyr::unnest(result) %>%
+  filter(!is.na(p_value), p_value < 0.05)
+
+```
+
+## Slope density plot
+
+```{r}
+
+# (1) Eh vs DO -------------------------------------------------
+slope_robusto %>%
+  ggplot(aes(x = slope_rlm, fill = site, color = site)) +
+  geom_density(alpha = 0.6) +  
+  scale_fill_manual(values = custom_colors) +
+  scale_color_manual(values = custom_colors) +
+  labs(
+    title = "",
+    x = "Eh-DO slopes",
+    y = "Density",
+    fill = "Sites",
+    color = "Sites"  
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title.x = element_text(size = 10, margin = ggplot2::margin(t = 2)), 
+    axis.title.y = element_text(size = 10, margin = ggplot2::margin(r = 3)), 
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray30") +
+  xlim(-40, 40) -> pd1
+
+# (2) Eh vs pH -------------------------------------------------
+slope_robusto2 %>%
+  ggplot(aes(x = slope, fill = site, color = site)) +
+  geom_density(alpha = 0.6) +  
+  scale_fill_manual(values = custom_colors) +
+  scale_color_manual(values = custom_colors) +
+  labs(
+    title = "",
+    x = "Eh-pH slopes",
+    y = "",
+    fill = "Sites",
+    color = "Sites"  
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title.x = element_text(size = 10, margin = ggplot2::margin(t = 2)), 
+    axis.title.y = element_text(size = 10, margin = ggplot2::margin(r = 3)))+ #
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray30") +
+  xlim(-400, 400) -> pd2
+
+
+# (3) Eh vs temp -------------------------------------------------
+slope_robusto3 %>%
+  ggplot(aes(x = slope_rlm, fill = site, color = site)) +
+  geom_density(alpha = 0.6) +  
+  scale_fill_manual(values = custom_colors) +
+  scale_color_manual(values = custom_colors) +
+  labs(
+    title = "",
+    x = "Eh-T slopes",
+    y = "",
+    fill = "Sites",
+    color = "Sites"  
+  ) +
+  theme_minimal() +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title.x = element_text(size = 10, margin = ggplot2::margin(t = 2)),  
+    axis.title.y = element_text(size = 10, margin = ggplot2::margin(r = 3)))+  
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray30") +
+  xlim(-60, 40)-> pd3
+
+```
+
+## Fig 1 Combining graphs
+
+```{r}
+
+# (1) density plots ------------------------------------
+combined_plot_slopes <-
+  pd1 +
+  pd2 +
+  pd3 +
+  plot_layout(ncol = 3, guides = "collect") &  
+  theme(legend.position = "bottom")           
+print(combined_plot_slopes)
+
+# (2) diel variations and density plots ----------------------
+
+combined_plot2 <- plot_grid(
+  plot_diel_Eh,
+  plot_diel_DO,
+  plot_diel_pH,
+  #plot_diel_T,
+  combined_plot_slopes,
+  ncol = 1,
+  labels = letters[1:5],
+  label_x = 0.01,
+  label_y = 0.99,
+  label_fontfamily = "Arial",
+  label_fontface = "bold",
+  label_size = 10,
+  rel_heights = c(1, 1, 1, 1, 1.4)  # ⬅ give slopes extra height
+)
+
+combined_plot2
+
+```
