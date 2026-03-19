@@ -5,7 +5,7 @@ format: html
 editor: visual
 ---
 
-## Read_df
+## Set up and read df
 
 ```{r}
 #| echo: false
@@ -16,11 +16,11 @@ editor: visual
 # Reads "df_exo_clima.csv" from "data.zip" without extracting to disk -- dfs with QAQC - Flags for out of data ranges and out of water
 require(pacman)
 p_load(data.table,  tidyverse, dplyr, ggplot, patchwork, cowplot, trend, robustbase, ggpubr)
-df <- read.csv(unz("df_exo_clima.zip", "df_exo_clima.csv"))
 
+df <- read.csv(unz("df_exo_clima.zip", "df_exo_clima.csv"))
 ```
 
-## Prep_df
+## Prep df
 
 ```{r}
 # (1) formating variables
@@ -51,6 +51,11 @@ df <- df %>%
     )
   )
 
+# (3) remove duplicates
+df <- df %>%
+  group_by(site, datetime) %>%
+  filter(row_number() == 1) %>%  
+  ungroup()
 ```
 
 ## Diel variation plots
@@ -453,7 +458,7 @@ summary_df_site <- df %>%
   )
 ```
 
-## Fig S2 
+## Fig S2
 
 ```{r}
 # Eh vs PAR -------------------------------------------------
@@ -491,7 +496,7 @@ plot_diel_PAR <- summary_df %>%
   )
 ```
 
-## Table S2 
+## Table S2
 
 ```{r}
 
@@ -743,9 +748,6 @@ slope_proportions_all_sites_T <- slope_summary_temp %>%
     slope_p75 = quantile(slope_rlm, probs = 0.75, na.rm = TRUE)
   )%>%
   dplyr::select(n_positive, n_negative, prop_negative, median_slope, slope_p25, slope_p75)
-
-
-
 ```
 
 ## Fig S3
@@ -898,7 +900,6 @@ final_plot <- plots_block / leg +
     ncol = 1,
     height = c(0.3, 0.3, 0.3, 0.1)   
   )
-
 ```
 
 # 
@@ -909,4 +910,4 @@ final_plot <- plots_block / leg +
 
 \
 
-##   
+## 

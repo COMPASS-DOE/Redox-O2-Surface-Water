@@ -1,0 +1,468 @@
+---
+title: "Data_prep_figures_metabolism_model"
+author: "Fausto Machado-Silva"
+format: html
+editor: visual
+---
+
+## Set up 
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+
+# Reads "df_exo_clima.csv" from "data.zip" without extracting to disk -- dfs with QAQC - Flags for out of data ranges and out of water
+require(pacman)
+p_load(data.table, zoo, dplyr, lubridate, tidyverse, LakeMetabolizer, MASS, robustbase)
+
+
+
+```
+
+## read df
+
+```{r}
+df <- read.csv(unz("df_exo_clima.zip", "df_exo_clima.csv"))
+```
+
+## Prep df
+
+```{r}
+# (1) formating variables-------------------------------------
+df <- df %>%
+  mutate(
+    site = factor(site, levels = c("CRC", "PTR", "OWC", "MSM")),       
+    datetime = force_tz(ymd_hms(datetime), tz = "EST"),             
+    source = as.factor(source),                                        
+    date = as_date(datetime),                                         
+    month = as.factor(format(datetime, "%b")),                         
+    year = as.factor(year(datetime)),                                  
+    time_day_c = format(datetime, "%H:%M"),
+    time_day = as.POSIXct(time_day_c, format = "%H:%M", tz = "EST"),
+    Eh = orp_mv - (0.718 * temp_c) + 224.41) %>%
+  dplyr::select(site, source, datetime, time_day, time_day_c, date, month, year, everything())
+
+tz(df$time_day)
+tz(df$datetime)
+
+# (2) excluding PAR (NA values) from OWC------------------
+df <- df %>%
+  mutate(
+    flag_PAR_out = case_when(
+      site == "OWC" & 
+        datetime > ymd_hms("2023-06-11 04:00:00") & 
+        datetime < ymd_hms("2023-06-14 08:00:00") ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
+
+# (3) remove duplicates-----------------------------------
+df <- df %>%
+  group_by(site, datetime) %>%
+  filter(row_number() == 1) %>%  # Keeps only the first row in each group
+  ungroup()
+
+# (4) select variables---------------------------------------
+df2 <- df %>%
+  dplyr::select(
+    datetime, 
+    date,
+    year,
+    month,
+    site, 
+    temp_c, 
+    ws_ms_s_wvt, 
+    odo_mg_l, 
+    bp_mbar, 
+    sal_psu, 
+    par_den_c_avg, 
+    Eh, 
+    ph, 
+    fdom_qsu,
+    depth_m
+  )
+
+# (5) adjusting df to have complete continuous datetime observations---
+complete_days <- df2 %>%
+  group_by(site, date) %>%
+  summarise(n_obs = n(), .groups = "drop") %>%
+  filter(n_obs > 80)
+
+time_grid <- complete_days %>% # Time_grid: continuous data in datetime
+  group_by(site, date) %>%
+  reframe(
+    datetime = seq(
+      from = as.POSIXct(paste(date, "00:00:00"), tz = "EST"),
+      to   = as.POSIXct(paste(date, "23:45:00"), tz = "EST"),
+      by   = "15 min"
+    ),
+    .groups = "drop"
+  )
+
+df2_interp <- time_grid %>%
+  left_join(df2, by = c("site", "date", "datetime")) %>%
+  arrange(site, date, datetime)
+
+# (6) Filling missing data: interpolating ---------------
+vars_to_interp <- c("temp_c", "ws_ms_s_wvt", "odo_mg_l", "bp_mbar", "sal_psu", "par_den_c_avg", "Eh", "ph", "fdom_qsu", "depth_m")
+
+df2_interp <- df2_interp %>%
+  group_by(site, date) %>%
+  arrange(datetime) %>%
+  mutate(across(all_of(vars_to_interp), ~na.approx(., x = datetime, na.rm = FALSE))) %>%
+  ungroup()
+
+
+# (7) select data of complete observations per day --------------------
+df_complete_days <- df2_interp %>%
+  # Group by both site and date
+  group_by(site, date) %>%
+  mutate(obs_per_date = n()) %>%
+  # Filter for 96 obs/day AND no NAs in key variables PER SITE
+  filter(obs_per_date == 96) 
+
+# Adjust a row. Find the row to copy (23:30:00 data for OWC on 2024-12-05)
+# Get row index of target observation
+target_row <- which(df_complete_days$site == "OWC" & 
+                      df_complete_days$datetime == "2024-12-05 23:45:00")
+
+# Get source values
+source_row <- which(df_complete_days$site == "OWC" & 
+                      df_complete_days$datetime == "2024-12-05 23:30:00")
+
+# Identify columns to update
+cols_to_update <- c("temp_c", "ws_ms_s_wvt", "odo_mg_l", "bp_mbar", "sal_psu", "par_den_c_avg", "Eh", "ph", "fdom_qsu", "depth_m")
+
+# Update only specific columns
+df_complete_days[target_row, cols_to_update] <- df_complete_days[source_row, cols_to_update]
+
+# NA Removal
+df_complete_days_no_NA <- df_complete_days %>%
+  group_by(site, date) %>%
+  filter(
+      all(!is.na(temp_c)) &
+      all(!is.na(ws_ms_s_wvt)) &
+      all(!is.na(odo_mg_l)) &
+      all(!is.na(bp_mbar)) &
+      all(!is.na(sal_psu)) &
+      all(!is.na(par_den_c_avg))
+  ) %>%
+  ungroup()
+
+df_complete_days_no_NA %>% 
+  count(site, date) %>% 
+  filter(n != 96)  # Should be empty
+
+df_complete_days_no_NA -> df3
+
+# remove 3 negative values:
+df3 <- df3 %>% mutate(odo_mg_l = ifelse(odo_mg_l < 0, 0, odo_mg_l))
+df3 <- df3 %>% mutate(temp_c = ifelse(temp_c < 0, 0, temp_c))
+df3 <- df3 %>% mutate(bp_mbar = ifelse(bp_mbar < 0, 1000, bp_mbar))
+
+
+# Model temperature requirements --------------------------------------
+
+# n dates
+valid_dates1 <- df3 %>%
+  group_by(site, date) %>%
+  ungroup() %>%
+  distinct(site, date)
+
+# Identify dates to keep (where ALL temp_c >= 4)
+valid_dates2 <- df3 %>%
+  group_by(site, date) %>%
+  filter(all(temp_c >= 4)) %>%
+  ungroup() %>%
+  distinct(site, date)
+
+# Identify dates to keep (where ALL temp_c >= 4)
+valid_dates3 <- df3 %>%
+  group_by(site, date) %>%
+  filter(all(temp_c < 35)) %>%
+  ungroup() %>%
+  distinct(site, date)
+
+# exclude dates t 0<t<3.5
+df_final <- df3 %>%
+  group_by(site, date) %>%
+  filter(all(temp_c >= 4 & temp_c <= 35)) %>%    # Keep only dates where ALL temps 4<t<35
+  ungroup()
+
+valid_dates4 <- df_final %>%
+  group_by(site, date) %>%
+  ungroup() %>%
+  distinct(site, date)
+
+# df done!
+df_final->df4
+df4->df
+
+```
+
+## Calcs and modelling
+
+```{r}
+# data smoothing
+df2 <- df %>%
+  mutate(
+    DO   = coalesce(rollmeanr(odo_mg_l, k = 4, fill = NA), odo_mg_l),
+    Temp = coalesce(rollmeanr(temp_c, k = 4, fill = NA), temp_c),
+    wind = coalesce(rollmeanr(ws_ms_s_wvt, k = 4, fill = NA), ws_ms_s_wvt),
+    BP   = coalesce(rollmeanr(bp_mbar, k = 4, fill = NA), bp_mbar),
+    sal  = coalesce(rollmeanr(sal_psu, k = 4, fill = NA), sal_psu),
+    PAR  = coalesce(rollmeanr(par_den_c_avg, k = 4, fill = NA), par_den_c_avg),
+    Eh2  = coalesce(rollmeanr(Eh, k = 4, fill = NA), Eh),
+    ph2  = coalesce(rollmeanr(ph, k = 4, fill = NA), ph),
+    fdom  = coalesce(rollmeanr(fdom_qsu, k = 4, fill = NA), fdom_qsu),
+    )%>%
+  dplyr::select(site, year, month, date, datetime,
+         DO  ,
+         Temp,
+         wind,
+         BP  ,
+         sal ,
+         PAR ,
+         Eh  ,
+         ph  ,
+         fdom,
+         Eh2,
+         ph2,
+         fdom
+         )
+
+# calculate day ranges
+df3 <- df2 %>%
+group_by(site, date) %>%
+  mutate(
+    delta_Eh = max(Eh2, na.rm = TRUE) - min(Eh2, na.rm = TRUE),
+    #delta_ph = max(ph2, na.rm = TRUE) - min(ph2, na.rm = TRUE),
+    #delta_fdom = max(fdom, na.rm = TRUE) - min(fdom, na.rm = TRUE),
+    #delta_DO = max(DO, na.rm = TRUE) - min(DO, na.rm = TRUE),
+    #avg_Eh = mean(Eh2, na.rm = TRUE)
+  )
+
+
+df3 <- df2 %>%
+  group_by(site, date) %>%
+  mutate(
+    delta_Eh = if (sum(!is.na(Eh2)) >= 2) {
+      abs(max(Eh2, na.rm = TRUE) - min(Eh2, na.rm = TRUE))
+    } else {
+      NA_real_
+    }
+  )
+
+
+# time series and modelling
+ts.data <- data.frame(
+  site        = df3$site,
+  date        = df3$date,
+  year        = df3$year,
+  month       = df3$month,
+  dateTime    = as.POSIXct(format(df3$datetime, "%Y-%m-%d %H:%M"), tz = "EST"),
+  datetime    = as.POSIXct(format(df3$datetime, "%Y-%m-%d %H:%M:%S"), tz = "EST"),
+  wnd.z       = 2,               
+  wnd         = df3$wind,    
+  temperature = df3$Temp, 
+  wtr         = df3$Temp,         
+  do.obs      = df3$DO,    
+  baro        = df3$BP,       
+  salinity    = df3$sal,   
+  irr         = df3$PAR,  
+  z.mix       = 2,
+  delta_Eh    = df3$delta_Eh
+  
+) %>%
+  group_by(site, date) %>%
+  mutate(
+    U10 = wind.scale.base(wnd, wnd.z),
+    k600 = k.cole.base(U10),
+    k.gas = k600.2.kGAS.base(k600, temperature=temperature, gas = "O2"),
+    do.sat = o2.at.sat.base(temperature, baro, altitude = 186, model = "garcia-benson")
+  ) %>%
+  group_by(site, date) %>%
+  mutate(
+    BOOK = metab.bookkeep(
+      do.obs = do.obs,
+      do.sat = do.sat,
+      k.gas = k.gas,
+      z.mix = z.mix,
+      irr = irr,
+      datetime = dateTime,
+      lake.lat = 41.37778
+    )
+  ) %>%
+  ungroup()
+```
+
+## Graphs
+
+```{r}
+
+custom_colors <- c("#440154FF", "#3E4A89FF", "#1F9E89FF", "#6DCD59FF")
+
+# prep variavbles
+daily_data <- ts.data %>%
+  # First get one row per day (since all delta values are identical within days)
+  group_by(site, date) %>%
+  slice(1) %>%  # Takes the first row for each group
+  ungroup() %>%
+  # Now create new variables
+  mutate(
+    GPP=BOOK$GPP,
+    R=BOOK$R,
+    NEP=BOOK$NEP
+    ) %>%
+  dplyr::select(
+    site, date, year, month,
+    delta_Eh, 
+    GPP, R, NEP, 
+    #avg_Eh
+  )
+
+
+# (1) Eh vs GPP --------------------------------------------------------------
+daily_data %>%
+  filter(GPP > 0, GPP < 40, delta_Eh < 200) %>%
+  ggplot(aes(x = GPP, y = delta_Eh, color = site)) +
+  geom_point(size = 4, alpha = 0.5) +           # Semi-transparent points
+  scale_color_manual(values = custom_colors) +  # Apply your custom colors
+  theme_bw() +
+  labs(
+    x = expression("GPP (mg O"[2]*" L"^{-1}*" d"^{-1}*" )"),
+    y = expression(Δ*"Eh (mV)"),
+    color = "Site"
+  ) +
+  theme(
+    legend.position = "top",  # Move legend to top
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14)
+  )+ 
+  geom_smooth(method = "rlm", se = TRUE, color = "black", aes(group = 1))->p_Eh_Gpp
+
+# (2) Eh vs R --------------------------------------------------------------
+  daily_data %>%
+    filter(R < 0, R > -40, delta_Eh < 200) %>%
+    ggplot(aes(x = R, y = delta_Eh, color = site)) +
+    geom_point(size = 4, alpha = 0.5) +  # Semi-transparent points
+    scale_color_manual(values = custom_colors) +  # Apply your custom colors
+    theme_bw() +
+    labs(
+      x = expression("R (mg O"[2]*" L"^{-1}*" d"^{-1}*" )"),
+      y = expression(Δ*"Eh (mV)"),
+      color = "Site"
+    ) +
+    theme(
+      legend.position = "top",  # Move legend to top
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14)
+    )+ 
+    geom_smooth(method = "rlm", se = TRUE, color = "black", aes(group = 1))
+  geom_smooth(method = "lm", se = FALSE, aes(group = site))->p_Eh_R
+```
+
+## Stats
+
+```{r}
+
+daily_data2 <- daily_data %>%
+  filter(GPP > 0, GPP < 40, delta_Eh < 200) 
+
+#deltaEh vs GPP
+fit_robust_GPP <- lmrob(delta_Eh ~ GPP, data = daily_data2)
+summary(fit_robust_GPP)
+
+#delta eh vs ER
+fit_robust_R <- lmrob(delta_Eh ~ R, data = daily_data2)
+summary(fit_robust_R)
+
+# delta Eh vs site
+kruskal.test(delta_Eh ~ site, data = daily_data2)
+rstatix::dunn_test(daily_data2, delta_Eh ~ site, p.adjust.method = "fdr")
+
+# GPP vs. site
+kruskal.test(GPP ~ site, data = daily_data2)
+rstatix::dunn_test(daily_data2, GPP ~ site, p.adjust.method = "fdr")
+
+# R vs site
+kruskal.test(R ~ site, data = daily_data2)
+rstatix::dunn_test(daily_data2, R ~ site, p.adjust.method = "fdr")
+```
+
+##  1 Combining graphs
+
+```{r}
+
+# (1) density plots ------------------------------------
+combined_plot_slopes <-
+  pd1 +
+  pd2 +
+  pd3 +
+  plot_layout(ncol = 3, guides = "collect") &  
+  theme(legend.position = "bottom")           
+print(combined_plot_slopes)
+
+# (2) diel variations and density plots ----------------------
+
+combined_plot2 <- plot_grid(
+  plot_diel_Eh,
+  plot_diel_DO,
+  plot_diel_pH,
+  #plot_diel_T,
+  combined_plot_slopes,
+  ncol = 1,
+  labels = letters[1:5],
+  label_x = 0.01,
+  label_y = 0.99,
+  label_fontfamily = "Arial",
+  label_fontface = "bold",
+  label_size = 10,
+  rel_heights = c(1, 1, 1, 1, 1.4)  # ⬅ give slopes extra height
+)
+
+combined_plot2
+
+```
+
+## Table S1
+
+```{r}
+
+```
+
+## Fig S2
+
+```{r}
+
+```
+
+## Table S2
+
+```{r}
+
+```
+
+## Table S3
+
+```{r}
+
+```
+
+## Fig S3
+
+```{r}
+
+```
+
+# 
+
+\
+
+\
+
+\
+
+## 
