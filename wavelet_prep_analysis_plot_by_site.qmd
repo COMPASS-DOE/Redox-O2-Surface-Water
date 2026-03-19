@@ -1,0 +1,509 @@
+---
+title: "Fig_2_and_3"
+author: "Fausto Machado-Silva"
+format: html
+editor: visual
+---
+
+## Read_df
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+
+# Reads "df_exo_clima.csv" from "data.zip" without extracting to disk -- dfs with QAQC - Flags for out of data ranges and out of water
+require(pacman)
+p_load(data.table,  tidyverse, tidyr, dplyr, zoo , ggplot, viridis, WaveletComp)
+df <- read.csv(unz("df_exo_clima.zip", "df_exo_clima.csv"))
+```
+
+## Prep_df
+
+```{r}
+# (1) adjusting variables --------------------------------------------------------------------
+df <- df %>%
+  mutate(
+    site = factor(site, levels = c("CRC", "PTR", "OWC", "MSM")),       
+    datetime = force_tz(ymd_hms(datetime), tz = ""),                   
+    source = as.factor(source),                                        
+    date = as_date(datetime),                                          
+    month_b = as.factor(format(datetime, "%b")),                        
+    Year = as.factor(year(datetime)),                                  
+    time_day_c = format(datetime, "%H:%M"),
+    time_day = as.POSIXct(time_day_c, format = "%H:%M", tz = ""),
+    Eh = orp_mv - (0.718 * temp_c) + 224.41,
+    Eh_lag = lag(Eh, 12)
+  )%>%
+  select(site, source, datetime, time_day, time_day_c, date, month_b, Year, everything())
+
+tz(df$datetime)
+tz(df$time_day)
+
+# temporal variables 
+df <- df %>%
+  mutate(
+    season = case_when(
+      month(datetime) %in% 3:5 ~ "Spring",
+      month(datetime) %in% 6:8 ~ "Summer",
+      month(datetime) %in% 9:11 ~ "Fall",
+      TRUE ~ "Winter"  # Default case for months 12,1,2
+    ),
+    # Convert to factor with ordered levels
+    season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall"), ordered = TRUE)
+  )
+
+df <- df %>%
+  mutate(site_month_year = paste(site, month_b, Year, sep = "-"),
+         month_year = paste(month_b, Year, sep = "-"),
+         site_season_year = paste(site, season, Year, sep = "-"),
+         year_season_site = paste(Year, season, site , sep = "-"),
+  )
+
+
+
+# (2) flags CRC DO~0 -------------------------------------------------------------
+df <- df %>%
+  mutate(flag_DO_near_0 = case_when(
+    site == "CRC" & odo_mg_l < 0.15 ~ TRUE,
+    site == "CRC" & odo_mg_l >= 0.15 ~ FALSE,
+    TRUE ~ FALSE  # For all other cases (non-CRC sites)
+  ))
+
+
+# Check Eh
+df %>% 
+  filter(
+    flag_out_range_depth    == FALSE,
+    flag_out_range_ph       == FALSE,
+    flag_out_range_temp     == FALSE,
+    flag_out_range_orp      == FALSE,
+    flag_out_range_fdom_qsu == FALSE, 
+    flag_out_range_fdom_rfu == FALSE,
+    flag_out_range_cond     == FALSE,
+    flag_out_of_water       == FALSE,
+    flag_out_of_SPC         == FALSE,
+    flag_out_DO_range       == FALSE,
+    flag_DO_near_0          == FALSE
+  ) %>%
+  group_by(site, Year) %>%
+  summarise(
+    n_valid_Eh = sum(!is.na(Eh)),
+    n_invalid  = sum(is.na(Eh)),
+    first_valid_datetime = min(datetime[!is.na(Eh)]),
+    last_valid_datetime  = max(datetime[!is.na(Eh)]),
+    .groups = "drop"
+  )
+
+# Check DO
+df %>% 
+  filter(
+    flag_out_range_depth    == FALSE,
+    flag_out_range_ph       == FALSE,
+    flag_out_range_temp     == FALSE,
+    flag_out_range_orp      == FALSE,
+    flag_out_range_fdom_qsu == FALSE, 
+    flag_out_range_fdom_rfu == FALSE,
+    flag_out_range_cond     == FALSE,
+    flag_out_of_water       == FALSE,
+    flag_out_of_SPC         == FALSE,
+    flag_out_DO_range       == FALSE,
+    flag_DO_near_0          == FALSE
+  ) %>%
+  group_by(site, Year) %>%
+  summarise(
+    n_valid_Eh = sum(!is.na(odo_mg_l)),
+    n_invalid  = sum(is.na(odo_mg_l)),
+    first_valid_datetime = min(datetime[!is.na(odo_mg_l)]),
+    last_valid_datetime  = max(datetime[!is.na(odo_mg_l)]),
+    .groups = "drop"
+  )
+
+
+# filter and exclude data for wavelet
+df2<-df %>% 
+  filter(
+    flag_out_range_depth    == FALSE,
+    flag_out_range_ph       == FALSE,
+    flag_out_range_temp     == FALSE,
+    flag_out_range_orp      == FALSE,
+    flag_out_range_fdom_qsu == FALSE, 
+    flag_out_range_fdom_rfu == FALSE,
+    flag_out_range_cond     == FALSE,
+    flag_out_of_water       == FALSE,
+    flag_out_of_SPC         == FALSE,
+    flag_out_DO_range       == FALSE,
+    flag_DO_near_0          == FALSE
+  ) 
+
+
+# Smoothed variables 
+window_size <- 4
+df <- df %>%
+  mutate(smoothed_do = rollmeanr(odo_mg_l, k = window_size, fill = NA),
+         smoothed_Eh = rollmeanr(Eh, k = window_size, fill = NA),
+         smoothed_Eh = rollmeanr(Eh, k = window_size, fill = NA),
+         smoothed_ph = rollmeanr(ph, k = window_size, fill = NA),
+         smoothed_fdom = rollmeanr(fdom_qsu, k = window_size, fill = NA),
+  )
+
+
+# Filtrar linhas onde Eh E DO estão presentes (excluir NAs em qualquer uma)
+df_sync <- df2 %>%
+  filter(
+    !is.na(Eh),
+    !is.na(odo_mg_l)
+  ) %>%
+  mutate(
+    Eh_norm = scale(Eh),
+    DO_norm = scale(odo_mg_l)
+  )
+
+# data/site/year
+df_sync %>%
+  group_by(site, Year) %>%
+  summarise(n = n(), .groups = "drop")
+
+# adjust datetime
+df <- df_sync %>%
+  mutate(datetime = parse_date_time(datetime, orders = c("ymd HMS", "ymd HM", "ymd"), tz = "EST"))
+
+# adjust temporal variables 
+df <- df %>%
+  mutate(
+    site = factor(site, levels = c("CRC", "PTR", "OWC", "MSM")),       
+    source = as.factor(source),          
+    date = as_date(datetime),                                          
+    month_b = as.factor(format(datetime, "%b")),                         
+    Year = as.factor(year(datetime)),                                  
+    time_day_c = format(datetime, "%H:%M"),
+    time_day = as.POSIXct(time_day_c, format = "%H:%M", tz = "EST"),
+    )%>%
+  select(site, source, datetime, time_day, time_day_c, date, month_b, Year, everything())
+
+tz(df$datetime)
+df$datetime
+df$time_day
+df$time_day_c
+
+
+# temporal variables 
+df <- df %>%
+  mutate(
+    season = case_when(
+      month(datetime) %in% 3:5 ~ "Spring",
+      month(datetime) %in% 6:8 ~ "Summer",
+      month(datetime) %in% 9:11 ~ "Fall",
+      TRUE ~ "Winter"  # Default case for months 12,1,2
+    ),
+    # Convert to factor with ordered levels
+    season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall"), ordered = TRUE)
+  )
+
+df <- df %>%
+  mutate(site_month_year = paste(site, month_b, Year, sep = "-"),
+         month_year = paste(month_b, Year, sep = "-"),
+         site_season_year = paste(site, season, Year, sep = "-"),
+         year_season_site = paste(Year, season, site , sep = "-"),
+  )
+
+
+# (2) flags 
+# filter and exclude data for wavelet
+df2<-df %>% 
+  filter(
+    flag_out_range_depth    == FALSE,
+    flag_out_range_ph       == FALSE,
+    flag_out_range_temp     == FALSE,
+    flag_out_range_orp      == FALSE,
+    flag_out_range_fdom_qsu == FALSE, 
+    flag_out_range_fdom_rfu == FALSE,
+    flag_out_range_cond     == FALSE,
+    flag_out_of_water       == FALSE,
+    flag_out_of_SPC         == FALSE,
+    flag_out_DO_range       == FALSE,
+    flag_DO_near_0          == FALSE
+  ) 
+
+
+# original code to create regular time series with NAs
+df3_regular <- df2 %>% 
+  select(datetime, site, Year, Eh, odo_mg_l) %>%
+  mutate(datetime = as.POSIXct(datetime)) %>%
+  arrange(datetime) %>%
+  group_by(site) %>%
+  complete(datetime = seq(min(datetime), max(datetime), by = "15 min")) %>%
+  ungroup()
+
+
+
+# (3) Wavelet ------------------------------------------------------------
+
+# Select site: OWC 2023
+df_site <- df3_regular %>%
+  filter(site == "OWC", 
+         Year=="2023") %>%
+  mutate(
+    Eh_norm = scale(Eh),
+    DO_norm = scale(odo_mg_l)
+  )%>%
+  filter(!is.na(Eh_norm), !is.na(DO_norm))%>%
+  select(datetime, Eh_norm, DO_norm)
+
+df_site <- as.data.frame(df_site)
+
+
+# Wavelet coherence (handles NAs)
+wc <- analyze.coherency(
+  df_site,
+  c("DO_norm", "Eh_norm"),
+  dt = 1/96,            # 15-min intervals (1/96 of a day)
+  lowerPeriod = 1/24,   # 1 hour
+  upperPeriod = 30,     # 30 days
+  make.pval = TRUE,     # Compute p-values
+  verbose = TRUE        # Warn about NAs
+)
+
+wc->wc_owc23
+```
+
+## Fig_2a
+
+```{r}
+# Rename the loaded wavelet object
+wc <- wc_owc23
+
+#bring original df
+#df <- read.csv(unz("df_exo_clima.zip", "df_exo_clima.csv"))
+
+# (2) Adjusting dfs -----------------------------------------------
+
+df <- df %>%
+  mutate(datetime = parse_date_time(datetime, orders = c("ymd HMS", "ymd HM", "ymd"), tz = "EST"))
+
+
+df <- df %>%
+  mutate(
+    site = factor(site, levels = c("CRC", "PTR", "OWC", "MSM")),       
+    source = as.factor(source),                                        
+    date = as_date(datetime),                                          
+    month_b = as.factor(format(datetime, "%b")),                        
+    Year = as.factor(year(datetime)),                                  
+    time_day_c = format(datetime, "%H:%M"),
+    time_day = as.POSIXct(time_day_c, format = "%H:%M", tz = "EST"),
+    Eh = orp_mv - (0.718 * temp_c) + 224.41
+  )%>%
+  select(site, source, datetime, time_day, time_day_c, date, month_b, Year, everything())
+
+tz(df$datetime)
+df$datetime
+df$time_day
+df$time_day_c
+
+
+# check PAR for times
+str(df)
+df %>%
+  filter(site=="OWC", 
+         datetime>"2023-10-01 00:00:00", 
+         datetime<"2023-10-03 00:00:00")%>%
+  ggplot(aes(x=datetime, y=par_den_c_avg))+
+  geom_point()
+
+
+# temporal variables 
+df <- df %>%
+  mutate(
+    season = case_when(
+      month(datetime) %in% 3:5 ~ "Spring",
+      month(datetime) %in% 6:8 ~ "Summer",
+      month(datetime) %in% 9:11 ~ "Fall",
+      TRUE ~ "Winter"  # Default case for months 12,1,2
+    ),
+    # Convert to factor with ordered levels
+    season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall"), ordered = TRUE)
+  )
+
+df <- df %>%
+  mutate(site_month_year = paste(site, month_b, Year, sep = "-"),
+         month_year = paste(month_b, Year, sep = "-"),
+         site_season_year = paste(site, season, Year, sep = "-"),
+         year_season_site = paste(Year, season, site , sep = "-"),
+  )
+
+
+# FLAGS: filter and exclude data for wavelet
+df2<-df %>% 
+  filter(
+    flag_out_range_depth    == FALSE,
+    flag_out_range_ph       == FALSE,
+    flag_out_range_temp     == FALSE,
+    flag_out_range_orp      == FALSE,
+    flag_out_range_fdom_qsu == FALSE, 
+    flag_out_range_fdom_rfu == FALSE,
+    flag_out_range_cond     == FALSE,
+    flag_out_of_water       == FALSE,
+    flag_out_of_SPC         == FALSE,
+    flag_out_DO_range       == FALSE,
+    ) 
+
+# original code to create regular time series 
+df3_regular <- df2 %>% 
+  select(datetime, date, site, Year, Eh, odo_mg_l) %>%
+  mutate(datetime = as.POSIXct(datetime)) %>%
+  arrange(datetime) %>%
+  group_by(site) %>%
+  complete(datetime = seq(min(datetime), max(datetime), by = "15 min")) %>%
+  ungroup()
+
+
+
+# 2.1. ----------------------------------------------------------------
+# Filter site and normalize
+df4 <- df3_regular %>%
+  filter(site == "OWC") %>%
+  filter(Year == "2023") %>%
+  mutate(
+    Eh_norm = as.numeric(scale(Eh)),
+    DO_norm = as.numeric(scale(odo_mg_l))
+  ) %>%
+  filter(!is.na(Eh_norm), !is.na(DO_norm)) %>%
+  select(datetime, date, Eh_norm, DO_norm)
+
+df4 <- as.data.frame(df4)
+str(df4)
+
+# monthly count with zero-filled months
+df4<- df4 %>%
+  mutate(month = lubridate::floor_date(datetime, "month")) 
+
+df4 %>% 
+  mutate(month = floor_date(datetime, "month")) %>% 
+  count(month)  
+
+
+# (3) plotting watvelet -------------------------------------------
+
+# Close any existing graphics devices
+while(!is.null(dev.list())) dev.off()
+dev.new(width = 12, height = 7)
+
+# X-axis prep
+time_points <- df4$datetime[!is.na(df4$DO_norm) & !is.na(df4$Eh_norm)]
+
+# x axis range
+range(time_points)
+
+# Create monthly breaks
+month_breaks <- seq(floor_date(min(time_points), "month"),
+                    ceiling_date(max(time_points), "month"),
+                    by = "1 month")
+
+month_breaks
+
+# Find their positions in wavelet time index
+month_positions <- sapply(month_breaks, function(x) {
+  which.min(abs(as.numeric(time_points - x)))
+})
+
+month_positions
+
+# adjusting monthth breaks for each site/year:
+month_breaks <-   c( "4","5"   , "6"  , "7"  , "8" , "9"  , "10" , "11" , "12")
+month_positions<- c(1,  1807,  4765,  7629, 10533, 13344, 16157, 19107, 20576)
+
+
+while(!is.null(dev.list())) dev.off()
+
+wc.image(
+  wc,
+  plot.contour = TRUE,
+  siglvl.contour = 0.05,
+  col.contour = "grey90",
+  col.arrow = "black",
+  color.palette = "rev(viridis::viridis(n.levels))",
+  which.image = "wc",
+  main = "OWC",
+  legend.params = list(n.ticks = 4, lab = "Coherence", lab.line = 2.5),
+  label.period.axis = FALSE,
+  label.time.axis = FALSE,  # DESATIVA o eixo x padrão
+  graphics.reset = FALSE,
+  timelab = "",  # Remove o label do eixo x
+  periodlab = "Period"
+)
+
+# Adiciona seu eixo x personalizado
+# axis(1, at = month_positions, labels = month_breaks,
+#      tck = -0.02, cex.axis = 0.8, line = 0.5, col = "black")
+
+axis(1, at = month_positions, labels = month_breaks, tck = -0.02)
+axis(2,
+     at = log2(c(1.5/24, 3/24, 6/24, 12/24, 1, 2, 4, 8, 16, 32)),
+     labels = c("1.5h", "3h", "6h", "12h", "1d", "2d", "4d", "8d", "16d", "32d"),
+     tck = -0.02,
+     las = 1)
+mtext("Months (2024)",
+      side = 1,     # Bottom side
+      line = 2.5,   # Position adjustment
+      cex = 1)
+# done!
+# redo with other sites and years using filters: site (CRC, PTR, OWC, MSM) and year (2022, 2023, 2024).
+```
+
+## Fig_2b
+
+```{r}
+df2 %>% 
+  filter(site=="OWC", 
+         Year =="2023",
+         date>("2023-05-09"),
+         date<("2023-05-20"))%>% 
+  ggplot(aes(x = datetime, y = Eh)) +
+  geom_point(size = 1.8, color="#440154FF", alpha = 0.5)+
+  labs(title="Eh-DO High Coherence", x = "time", y = "Eh (mV)" )+
+  theme(text = element_text(size = 12))-> plot_Eh_high_coherence
+
+df2 %>% 
+  filter(site=="OWC", 
+         Year =="2023",
+         date>("2023-05-09"),
+         date<("2023-05-20"))%>% 
+  ggplot(aes(x = datetime, y = odo_mg_l)) +
+  geom_point(size = 1.8, color= "#2A788EFF", alpha = 0.5)+
+  labs(x = "time", y = expression(DO~(mg~L^{-1})))+
+  theme(text = element_text(size = 12))->plot_DO_high_coherence 
+
+df2 %>% 
+  filter(site=="OWC", 
+         Year =="2023",
+         date>("2023-07-05"),
+         date<("2023-07-15"))%>% 
+  ggplot(aes(x = datetime, y = Eh)) +
+  geom_point(size = 1.8, color="#440154FF", alpha = 0.5)+
+  labs(title="Eh-DO Low Coherence", x = "time", y = "Eh (mV)" )+
+  theme(text = element_text(size = 12))->plot_Eh_low_coherence
+
+df2 %>% 
+  filter(site=="OWC", 
+         Year =="2023",
+         date>("2023-07-05"),
+         date<("2023-07-15"))%>% 
+  ggplot(aes(x = datetime, y = odo_mg_l)) +
+  geom_point(size = 1.8, color= "#2A788EFF", alpha = 0.5)+
+  labs(x = "time", y = expression(DO~(mg~L^{-1})))+
+  theme(text = element_text(size = 12))->plot_DO_low_coherence  
+
+plot_Eh_high_coherence
+plot_DO_high_coherence
+plot_Eh_low_coherence
+plot_DO_low_coherence
+```
+
+\
+
+\
+
+\
+
+\
